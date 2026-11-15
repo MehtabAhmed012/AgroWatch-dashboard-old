@@ -40,14 +40,14 @@ var SEASONS = {
 };
 
 // VCI thresholds (0-100) -> stress classes 1..5
-var CLASS_NAMES = ['Normal (VCI >= 50)', 'Watch (35-50)', 'Moderate stress (20-35)',
+var CLASS_NAMES = ['Normal (VCI >= 50)', 'Low Stress (35-50)', 'Moderate stress (20-35)',
                    'Severe stress (10-20)', 'Extreme stress (< 10)'];
 var CLASS_COLORS = ['#1a9850', '#fee08b', '#fdae61', '#d73027', '#7f0000'];
 
-var NDVI_PAL = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#1a9850', '#006837'];
-var ANOM_PAL = ['#8c510a', '#d8b365', '#f6e8c3', '#f5f5f5', '#c7eae5', '#5ab4ac', '#01665e'];
-var RAIN_PAL = ['#ffffcc', '#c7e9b4', '#7fcdbb', '#41b6c4', '#2c7fb8', '#253494'];
-var PCT_PAL = ['#a50026', '#f46d43', '#fee08b', '#ffffbf', '#a6d96a', '#1a9850', '#313695'];
+var NDVI_PAL = ['#ca1107', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#1a9850', '#006837'];
+var ANOM_PAL = ['#5ab4ac', '#c7eae5', '#f5f5f5', '#f6e8c3', '#d8b365', '#8c510a', '#01665e'];
+var RAIN_PAL = ['#253494', '#ffffcc', '#c7e9b4', '#7fcdbb', '#41b6c4', '#2c7fb8'];
+var PCT_PAL =  ['#313695', '#1a9850', '#a6d96a', '#ffffbf', '#fee08b', '#f46d43', '#bb0000'];
 
 
 // ================================================================

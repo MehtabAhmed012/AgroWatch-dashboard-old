@@ -34,7 +34,7 @@ SEASONS = {
 # VCI classes: 1 = normal ... 5 = extreme stress
 CLASSES = [
     {"id": 1, "name": "Normal", "range": "VCI 50 and above", "color": "#1a9850"},
-    {"id": 2, "name": "Watch", "range": "VCI 35 to 50", "color": "#fee08b"},
+    {"id": 2, "name": "Low Stress", "range": "VCI 35 to 50", "color": "#fee08b"},
     {"id": 3, "name": "Moderate stress", "range": "VCI 20 to 35", "color": "#fdae61"},
     {"id": 4, "name": "Severe stress", "range": "VCI 10 to 20", "color": "#d73027"},
     {"id": 5, "name": "Extreme stress", "range": "VCI below 10", "color": "#7f0000"},
@@ -43,7 +43,7 @@ CLASSES = [
 NDVI_PAL = ["#d73027", "#fc8d59", "#fee08b", "#d9ef8b", "#91cf60", "#1a9850", "#006837"]
 ANOM_PAL = ["#8c510a", "#d8b365", "#f6e8c3", "#f5f5f5", "#c7eae5", "#5ab4ac", "#01665e"]
 RAIN_PAL = ["#ffffcc", "#c7e9b4", "#7fcdbb", "#41b6c4", "#2c7fb8", "#253494"]
-PCT_PAL = ["#a50026", "#f46d43", "#fee08b", "#ffffbf", "#a6d96a", "#1a9850", "#313695"]
+PCT_PAL =  ["#313695", "#1a9850", "#a6d96a", "#ffffbf", "#fee08b", "#f46d43" ,"#a50026"]
 
 # key -> label shown on the map tabs, which analysis image it uses, unit
 LAYERS = {
@@ -191,6 +191,13 @@ def _mask_index_s2(img):
     return ndvi.addBands(evi).updateMask(ok).copyProperties(img, ["system:time_start"])
 
 
+def _guard(col, bands):
+    """Add one fully-masked placeholder image so an empty collection (season not finished,
+    data lag) still returns an image with the right band names instead of crashing."""
+    ph = ee.Image.constant([0] * len(bands)).rename(bands).selfMask()
+    return col.merge(ee.ImageCollection([ph]))
+
+
 def _modis_season(year, season):
     start, end = season_range(year, season)
 
@@ -201,12 +208,14 @@ def _modis_season(year, season):
             .copyProperties(img, ["system:time_start"])
         )
 
-    return ee.ImageCollection(MODIS_ID).filterDate(start, end).map(prep).mean()
+    col = ee.ImageCollection(MODIS_ID).filterDate(start, end).map(prep)
+    return _guard(col, ["NDVI", "EVI"]).mean()
 
 
 def _rain_season(year, season):
     start, end = season_range(year, season)
-    return ee.ImageCollection(CHIRPS_ID).filterDate(start, end).select("precipitation").sum().rename("rain")
+    col = ee.ImageCollection(CHIRPS_ID).filterDate(start, end).select("precipitation")
+    return _guard(col, ["precipitation"]).sum().rename("rain")
 
 
 def _baseline(fn, season):
@@ -303,22 +312,32 @@ def get_stats(province, district, year, season):
 
 @ttl_cache(21600)
 def get_series(province, district, year, season):
-    """Seasonal mean NDVI / EVI / VCI / rainfall for every year from 2001 to `year`."""
+    """Seasonal mean NDVI / EVI / VCI / rainfall for every year from 2001 to `year`.
+
+    Every year is stacked as bands of one image so Earth Engine computes everything in a
+    single pass (the baseline min/max is built once, not once per year)."""
     a = _analysis(province, district, year, season)
     geom, crop = a["geom"], _crop_mask()
+    years = list(range(BASE_START, int(year) + 1))
 
-    def per_year(y):
-        y = ee.Number(y)
+    ndvi_b, evi_b, rain_b = [], [], []
+    for y in years:
         cur = _modis_season(y, season)
-        vci = (cur.select("NDVI").subtract(a["b_min"]).divide(a["b_max"].subtract(a["b_min"]))
-               .multiply(100).clamp(0, 100).rename("VCI"))
-        m = _rr(cur.addBands(vci).updateMask(crop), ee.Reducer.mean(), geom, 1000)
-        r = _rr(_rain_season(y, season), ee.Reducer.mean(), geom, 5566)
-        return ee.Feature(None, {"year": y, "NDVI": m.get("NDVI"), "EVI": m.get("EVI"),
-                                 "VCI": m.get("VCI"), "rain": r.get("rain")})
+        ndvi_b.append(cur.select("NDVI").rename(f"NDVI_{y}"))
+        evi_b.append(cur.select("EVI").rename(f"EVI_{y}"))
+        rain_b.append(_rain_season(y, season).rename(f"rain_{y}"))
 
-    fc = ee.FeatureCollection(ee.List.sequence(BASE_START, year).map(per_year)).getInfo()
-    return {"rows": [f["properties"] for f in fc["features"]], "base": [BASE_START, BASE_END]}
+    ndvi = ee.Image.cat(ndvi_b)
+    vci = (ndvi.subtract(a["b_min"]).divide(a["b_max"].subtract(a["b_min"]))
+           .multiply(100).clamp(0, 100).rename([f"VCI_{y}" for y in years]))
+
+    m = _rr(ee.Image.cat([ndvi, ee.Image.cat(evi_b), vci]).updateMask(crop),
+            ee.Reducer.mean(), geom, 1000).getInfo()
+    r = _rr(ee.Image.cat(rain_b), ee.Reducer.mean(), geom, 5566).getInfo()
+
+    rows = [{"year": y, "NDVI": m.get(f"NDVI_{y}"), "EVI": m.get(f"EVI_{y}"),
+             "VCI": m.get(f"VCI_{y}"), "rain": r.get(f"rain_{y}")} for y in years]
+    return {"rows": rows, "base": [BASE_START, BASE_END]}
 
 
 @ttl_cache(21600)
@@ -327,24 +346,21 @@ def get_rain_monthly(province, district, year):
     geom = _region_fc(province, district).geometry()
     chirps = ee.ImageCollection(CHIRPS_ID).select("precipitation")
 
-    def per_month(mo):
-        mo = ee.Number(mo)
-        s = ee.Date.fromYMD(year, mo, 1)
-        obs = chirps.filterDate(s, s.advance(1, "month")).sum()
+    def month_sum(y, mo):
+        s0 = ee.Date.fromYMD(y, mo, 1)
+        return _guard(chirps.filterDate(s0, s0.advance(1, "month")), ["precipitation"]).sum()
 
-        def clim_year(by):
-            bs = ee.Date.fromYMD(by, mo, 1)
-            return chirps.filterDate(bs, bs.advance(1, "month")).sum()
+    bands = []
+    for mo in range(1, 13):
+        obs = month_sum(int(year), mo).rename(f"obs_{mo}")
+        normal = ee.ImageCollection(
+            [month_sum(by, mo) for by in range(BASE_START, BASE_END + 1)]).mean().rename(f"normal_{mo}")
+        bands += [obs, normal]
 
-        normal = ee.ImageCollection(ee.List.sequence(BASE_START, BASE_END).map(clim_year)).mean()
-        return ee.Feature(None, {
-            "month": mo,
-            "observed": _rr(obs, ee.Reducer.mean(), geom, 5566).get("precipitation"),
-            "normal": _rr(normal, ee.Reducer.mean(), geom, 5566).get("precipitation"),
-        })
-
-    fc = ee.FeatureCollection(ee.List.sequence(1, 12).map(per_month)).getInfo()
-    return {"rows": [f["properties"] for f in fc["features"]]}
+    d = _rr(ee.Image.cat(bands), ee.Reducer.mean(), geom, 5566).getInfo()
+    rows = [{"month": mo, "observed": d.get(f"obs_{mo}"), "normal": d.get(f"normal_{mo}")}
+            for mo in range(1, 13)]
+    return {"rows": rows}
 
 
 @ttl_cache(3600)
@@ -432,3 +448,4 @@ def build_insights(stats, series):
                      "text": f"Severe or extreme stress covers {worst:,.0f} ha. Open the Stress layer and zoom in."})
 
     return {"risk": level, "stressed_pct": sp, "health_index": vci, "messages": msgs}
+#updated

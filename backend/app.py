@@ -7,6 +7,7 @@ import logging
 import os
 from datetime import date
 
+import ee
 from dotenv import load_dotenv
 
 load_dotenv()  # must run before importing modules that read env vars
@@ -163,6 +164,12 @@ def bad_request(e):
     return jsonify(error=str(e)), 400
 
 
+@app.errorhandler(ee.EEException)
+def earth_engine_error(e):
+    log.error("Earth Engine error: %s", e)
+    return jsonify(error="Earth Engine: " + str(e)[:300]), 502
+
+
 @app.errorhandler(RuntimeError)
 def config_error(e):
     log.error("Configuration error: %s", e)
@@ -180,5 +187,30 @@ def server_error(e):
     return jsonify(error=str(e) if app.debug else "Server error. Check the backend logs."), 500
 
 
+def start_ngrok(port):
+    """Optional: give this server a public https address (set USE_NGROK=true in .env)."""
+    from pyngrok import ngrok  # downloads the ngrok program automatically on first use
+
+    token = os.getenv("NGROK_AUTHTOKEN")
+    if token:
+        ngrok.set_auth_token(token)
+    domain = os.getenv("NGROK_DOMAIN") or None
+    tunnel = ngrok.connect(port, "http", domain=domain) if domain else ngrok.connect(port, "http")
+    url = tunnel.public_url.replace("http://", "https://", 1)
+    print("\n" + "=" * 64)
+    print(" ngrok public address:", url)
+    print(" Put it in frontend/index.html as window.AGROWATCH_API_BASE")
+    print(" and add your website to ALLOWED_ORIGINS in .env")
+    print("=" * 64 + "\n")
+    return url
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=os.getenv("FLASK_DEBUG") == "1")
+    port = int(os.getenv("PORT", 5000))
+    debug = os.getenv("FLASK_DEBUG") == "1"
+    use_ngrok = os.getenv("USE_NGROK", "false").lower() == "true"
+    if use_ngrok:
+        start_ngrok(port)
+    # The auto-reloader would start a second tunnel, so it is off when ngrok is on.
+    app.run(host="0.0.0.0", port=port, debug=debug, use_reloader=debug and not use_ngrok)
+    # updated
